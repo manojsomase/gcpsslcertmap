@@ -40,7 +40,7 @@ Once teh entries are propogated, it will ask you if you want to attach this cert
 
 It will output a `dns.txt` file where you can ss the required DNS records for certificate provisioning process. Once you make the DNS records, wait for some time for certs to get approved.
 
-## 2. Create many certs at bulk in 1 go.
+## 2. Create certs in bulk quickly.
 
 This is done by providing all the domain names in inout txt file called `domain.txt`. The domain names shoud be present one by one each in new line. Exexute the bash script `sh bulk.sh` and it will create all the ssl certs in 1 go, by giving relevant names to certificates and dns auth.
 Once the above step is complete, it will ask you further details of cert map name and will proceed from there like method#1 mentioned above. Finally, it will output a `dns.txt` file where you can ss the required DNS records for certificate provisioning process. Once you make the DNS records, wait for some time for certs to get approved.
