@@ -32,7 +32,16 @@ create_certificate() {
   gcloud certificate-manager dns-authorizations create $CERT_AUTH_NAME --domain="$DOMAIN_NAME"
 
   # Step 2: Get the CNAME value for DNS Auth
-  gcloud certificate-manager dns-authorizations describe $CERT_AUTH_NAME
+  #gcloud certificate-manager dns-authorizations describe $CERT_AUTH_NAME
+  DNS_AUTH_OUTPUT=$(gcloud certificate-manager dns-authorizations describe $CERT_AUTH_NAME --format="yaml(dnsResourceRecord, domain)")
+
+
+  # Extract the name and data from the output
+  NAME=$(echo "$DNS_AUTH_OUTPUT" | grep "^  name:" | awk '{print $2}')
+  DATA=$(echo "$DNS_AUTH_OUTPUT" | grep "^  data:" | awk '{print $2}')
+
+  # Save to dns.txt
+  echo "$NAME $DATA" >> dns.txt
 
   # Step 3: Create the SSL cert request
   gcloud certificate-manager certificates create $CERT_NAME --domains="$DOMAIN_NAME" --dns-authorizations="$CERT_AUTH_NAME"
