@@ -1,0 +1,328 @@
+https://medium.com/google-cloud/manage-ssl-certificates-at-scale-using-google-certificate-manager-fcf1858c6b20
+
+Manage SSL certificates at scale using Google Certificate manager
+
+The rise of cloud-based applications and ease of setting up a web app has led to an explosion of digital certificates. But with great scale comes great responsibility — the responsibility of keeping track of, renewing, and deploying all those certificates. For many organizations, this translates to manual processes, complex spreadsheets, and the constant worry of certificate expiration leading to security vulnerabilities.
+
+In this blog post, we’ll introduce you to Google Certificate Manager automation, a powerful tool automation that helps you manage SSL certificates at scale. We’ll explore how Certificate Manager simplifies the entire certificate lifecycle, from automated issuance and renewal to granular control over deployment. Whether you’re managing a handful of certificates or thousands, Certificate Manager can streamline your process and free you to focus on what matters most — building secure and reliable applications.
+
+What is Cert Map and why it is useful?
+In Google Cloud Certificate Manager, a certificate map acts like a routing table for your TLS/SSL certificates. It lets you link specific certificates to corresponding hostnames.
+
+Here’s a breakdown of how cert maps work:
+
+Grouping Certificates: A certificate map groups one or more certificates together. Each entry within the map associates a certificate with a particular domain name.
+Targeted Deployment: You can then attach this certificate map to a load balancer. The load balancer will then use the appropriate certificate from the map based on the hostname requested by the user.
+Reuse and Flexibility: A single certificate map can be shared across multiple load balancers and target proxies, promoting reuse and simplifying management.
+
+Think of it like a central registry for your certificates, allowing you to easily manage which certificate gets served for a specific hostname across different resources. This is particularly useful when dealing with multiple certificates for different subdomains or applications. Lets understand the overall flow first before moving towards automation.
+
+The process of creating the SSL map is:
+
+Create a DNS authorization. This will give you the CNAME record required for the certificate issue.
+Create the SSL certificate using the DNS auth created in the above step.
+Create the Cert Map, and add the certificates into the map.
+
+Cert Map flow
+Once the Cert map is created, this can be attached to a load balancer. Note that 100’s of certificates can be part of a single cert map, and this cert map then gets added to the load balancer, enabling it to handled hundreds of ssl certs. Until the DNS auth record exists, Google Certificate manager will take care of the certificate renewal too.
+
+The steps required to create SSL cert and Cert Map:
+Step 1: Create SSL cert DNS Auth
+
+gcloud certificate-manager dns-authorizations create r00t-auth - domain="r00t.in"
+Step 2: Get the CNAME value for DNS Auth
+
+gcloud certificate-manager dns-authorizations describe r00t-auth
+Step 3: Create the SSL cert request
+
+gcloud certificate-manager certificates create my-r00t-cert - domains="r00t.in" - dns-authorizations="r00t-auth"
+To check the status of ssl cert, use
+
+gcloud certificate-manager certificates describe my-r00t-cert
+lets create another SSL cert for www.r00t.in by repeating the above steps.
+
+We have 2 ssl certs active now
+r00t.in and www.r00t.in
+
+Step 4: Create SSL cert map
+
+gcloud certificate-manager maps create r00t-map
+Step 5: Associate SSL certs with the cert map
+
+gcloud certificate-manager maps entries create r00t-in-entry - map="r00t-map" - certificates="my-r00t-cert" - hostname="r00t.in"
+gcloud certificate-manager maps entries create www-r00t-in-entry - map="r00t-map" - certificates="my-www-r00t-cert" - hostname="www.r00t.in"
+Important: You need to check if the map is active before proceeding to the next steps
+
+gcloud certificate-manager maps entries describe r00t-in-entry - map="r00t-map"
+gcloud certificate-manager maps entries describe www-r00t-in-entry - map="r00t-map"
+Step 6: Attach the SSL Map with the Load Balancer
+check for the available LBs
+
+gcloud compute target-https-proxies list
+Please note that if you do not have any LB with SSL enabled, it will not show up above. Hence, in case you have a newly created LB where you want the SSL cert, create any dummy SSL cert in the UI and associate with LB first. You dont need to wait for cert to get provisioned. Lets associate LB with the ssl cert
+
+gcloud compute target-https-proxies update my-load-balancer-target-proxy-2 - certificate-map="r00t-map"
+A wildcard certificate can be associated with a Load Balancer through SSL Map only.
+
+Automation:
+I understand that so many steps might confuse you sometime. In case you want to create a huge number of certificates, then some automation is definitely helpful. Hence I wrote few bash script which should ease the process for you.
+
+Creating certs, map, and attaching it to load balancer.
+You may use the following bash shell script for performing these tasks in automated fashion. It will ask you few simple questions, and will create the assets for you. Run the following script in your Cloud shell.
+
+#!/bin/bash
+
+set -e
+
+validate_name() {
+  local name=$1
+  if [[ ! $name =~ ^[a-z0-9\-]{1,63}$ ]]; then
+    echo "Invalid name: $name"
+    echo "Name must consist of lower case letters, digits, and hyphens, and be no more than 63 characters long."
+    return 1
+  fi
+  return 0
+}
+
+create_certificate() {
+  while true; do
+    echo "Enter the domain name:"
+    read DOMAIN_NAME
+
+    echo "Enter the certificate name (lowercase letters, digits, hyphens, max 63 characters):"
+    read CERT_NAME
+    validate_name $CERT_NAME && break
+  done
+
+  while true; do
+    echo "Enter the unique name for the certificate authorization (lowercase letters, digits, hyphens, max 63 characters):"
+    read CERT_AUTH_NAME
+    validate_name $CERT_AUTH_NAME && break
+  done
+
+  # Step 1: Create SSL cert DNS Auth
+  gcloud certificate-manager dns-authorizations create $CERT_AUTH_NAME --domain="$DOMAIN_NAME"
+
+  # Step 2: Get the CNAME value for DNS Auth
+  #gcloud certificate-manager dns-authorizations describe $CERT_AUTH_NAME
+  DNS_AUTH_OUTPUT=$(gcloud certificate-manager dns-authorizations describe $CERT_AUTH_NAME --format="yaml(dnsResourceRecord, domain)")
+
+
+  # Extract the name and data from the output
+  NAME=$(echo "$DNS_AUTH_OUTPUT" | grep "^  name:" | awk '{print $2}')
+  DATA=$(echo "$DNS_AUTH_OUTPUT" | grep "^  data:" | awk '{print $2}')
+
+  # Save to dns.txt
+  echo "$NAME $DATA" >> dns.txt
+
+  # Step 3: Create the SSL cert request
+  gcloud certificate-manager certificates create $CERT_NAME --domains="$DOMAIN_NAME" --dns-authorizations="$CERT_AUTH_NAME"
+
+  # Check the status of SSL cert
+  gcloud certificate-manager certificates describe $CERT_NAME
+}
+
+CERT_NAMES=()
+CERT_AUTH_NAMES=()
+DOMAIN_NAMES=()
+
+create_certificate
+CERT_NAMES+=($CERT_NAME)
+CERT_AUTH_NAMES+=($CERT_AUTH_NAME)
+DOMAIN_NAMES+=($DOMAIN_NAME)
+
+while true; do
+  echo "Do you want to add another domain and create its certificate? (y/n):"
+  read ADD_ANOTHER
+  if [[ $ADD_ANOTHER == "y" ]]; then
+    create_certificate
+    CERT_NAMES+=($CERT_NAME)
+    CERT_AUTH_NAMES+=($CERT_AUTH_NAME)
+    DOMAIN_NAMES+=($DOMAIN_NAME)
+  else
+    break
+  fi
+done
+
+# Step 4: Create SSL cert map
+while true; do
+  echo "Enter the name for the certificate map (lowercase letters, digits, hyphens, max 63 characters):"
+  read CERT_MAP_NAME
+  validate_name $CERT_MAP_NAME && break
+done
+
+gcloud certificate-manager maps create $CERT_MAP_NAME
+
+# Step 5: Associate SSL certs with the cert map
+for i in "${!CERT_NAMES[@]}"; do
+  CERT_NAME=${CERT_NAMES[$i]}
+  DOMAIN_NAME=${DOMAIN_NAMES[$i]}
+  MAP_ENTRY_NAME=$(echo $DOMAIN_NAME | sed 's/\./-/g')-entry
+  gcloud certificate-manager maps entries create $MAP_ENTRY_NAME --map="$CERT_MAP_NAME" --certificates="$CERT_NAME" --hostname="$DOMAIN_NAME"
+done
+
+# Check if the map entries are active before proceeding
+for i in "${!CERT_NAMES[@]}"; do
+  DOMAIN_NAME=${DOMAIN_NAMES[$i]}
+  MAP_ENTRY_NAME=$(echo $DOMAIN_NAME | sed 's/\./-/g')-entry
+  
+  echo "Checking status for map entry $MAP_ENTRY_NAME..."
+  while true; do
+    STATUS=$(gcloud certificate-manager maps entries describe $MAP_ENTRY_NAME --map="$CERT_MAP_NAME" --format="value(state)")
+    if [[ $STATUS == "ACTIVE" ]]; then
+      echo "Map entry $MAP_ENTRY_NAME is ACTIVE."
+      break
+    else
+      echo "Map entry $MAP_ENTRY_NAME is $STATUS. Waiting..."
+      for i in {1..60}; do
+        echo -n "."
+        sleep 1
+      done
+      echo
+    fi
+  done
+done
+
+# Step 6: Optional - Attach the SSL Map with the Load Balancer
+echo "Do you want to attach the SSL map to a load balancer? (y/n):"
+read ATTACH_LB
+if [[ $ATTACH_LB == "y" ]]; then
+  LB_LIST=$(gcloud compute target-https-proxies list --format="value(name)")
+  if [[ -z $LB_LIST ]]; then
+    echo "There are no eligible load balancers available for SSL map association. Please create a suitable load balancer and try again."
+  else
+    echo "Available load balancers:"
+    echo "$LB_LIST"
+    echo "Enter the name of the load balancer target proxy:"
+    read LB_TARGET_PROXY_NAME
+    gcloud compute target-https-proxies update $LB_TARGET_PROXY_NAME --certificate-map="$CERT_MAP_NAME"
+  fi
+else
+  echo "SSL map creation completed without attaching to a load balancer."
+fi
+
+echo "Script execution completed."
+The last step is optional, where it will ask you attach the cert map to the load balancer. Once executed successfully, it will create a local file with name dns.txt, which will contain all the required dns records required for your ssl certs provisioning.
+
+Creating certs in bulk:
+What if you required to create many certs in 1 go. The following bash script will take an input file called domain.txt, which should contain different hostnames, for which you need certs, each in a new line. Once executed, it will create a local file with name dns.txt, which will contain all the required dns records required for your ssl certs provisioning.
+
+#!/bin/bash
+
+set -e
+
+validate_name() {
+  local name=$1
+  if [[ ! $name =~ ^[a-z0-9\-]{1,63}$ ]]; then
+    echo "Invalid name: $name"
+    echo "Name must consist of lower case letters, digits, and hyphens, and be no more than 63 characters long."
+    return 1
+  fi
+  return 0
+}
+
+create_certificate() {
+  DOMAIN_NAME=$1
+  CERT_NAME=$(echo "${DOMAIN_NAME}-cert" | tr '.' '-')
+  CERT_AUTH_NAME=$(echo "${DOMAIN_NAME}-auth" | tr '.' '-')
+
+  validate_name $CERT_NAME
+  validate_name $CERT_AUTH_NAME
+
+  # Step 1: Create SSL cert DNS Auth
+  gcloud certificate-manager dns-authorizations create $CERT_AUTH_NAME --domain="$DOMAIN_NAME"
+
+  # Step 2: Get the CNAME value for DNS Auth
+  DNS_AUTH_OUTPUT=$(gcloud certificate-manager dns-authorizations describe $CERT_AUTH_NAME --format="yaml(dnsResourceRecord, domain)")
+
+  # Extract the name and data from the output
+  NAME=$(echo "$DNS_AUTH_OUTPUT" | grep "^  name:" | awk '{print $2}')
+  DATA=$(echo "$DNS_AUTH_OUTPUT" | grep "^  data:" | awk '{print $2}')
+
+  # Save to dns.txt
+  echo "$NAME $DATA" >> dns.txt
+
+  # Step 3: Create the SSL cert request
+  gcloud certificate-manager certificates create $CERT_NAME --domains="$DOMAIN_NAME" --dns-authorizations="$CERT_AUTH_NAME"
+
+  # Check the status of SSL cert
+  gcloud certificate-manager certificates describe $CERT_NAME
+}
+
+CERT_NAMES=()
+CERT_AUTH_NAMES=()
+DOMAIN_NAMES=()
+
+if [[ ! -f domain.txt ]]; then
+  echo "The file domain.txt does not exist. Please create the file with domain names, one per line."
+  exit 1
+fi
+
+while IFS= read -r DOMAIN_NAME; do
+  create_certificate $DOMAIN_NAME
+  CERT_NAMES+=($CERT_NAME)
+  CERT_AUTH_NAMES+=($CERT_AUTH_NAME)
+  DOMAIN_NAMES+=($DOMAIN_NAME)
+done < domain.txt
+
+# Step 4: Create SSL cert map
+while true; do
+  echo "Enter the name for the certificate map (lowercase letters, digits, hyphens, max 63 characters):"
+  read CERT_MAP_NAME
+  validate_name $CERT_MAP_NAME && break
+done
+
+gcloud certificate-manager maps create $CERT_MAP_NAME
+
+# Step 5: Associate SSL certs with the cert map
+for i in "${!CERT_NAMES[@]}"; do
+  CERT_NAME=${CERT_NAMES[$i]}
+  DOMAIN_NAME=${DOMAIN_NAMES[$i]}
+  MAP_ENTRY_NAME=$(echo $DOMAIN_NAME | sed 's/\./-/g')-entry
+  gcloud certificate-manager maps entries create $MAP_ENTRY_NAME --map="$CERT_MAP_NAME" --certificates="$CERT_NAME" --hostname="$DOMAIN_NAME"
+done
+
+# Check if the map entries are active before proceeding
+for i in "${!CERT_NAMES[@]}"; do
+  DOMAIN_NAME=${DOMAIN_NAMES[$i]}
+  MAP_ENTRY_NAME=$(echo $DOMAIN_NAME | sed 's/\./-/g')-entry
+  
+  echo "Checking status for map entry $MAP_ENTRY_NAME..."
+  while true; do
+    STATUS=$(gcloud certificate-manager maps entries describe $MAP_ENTRY_NAME --map="$CERT_MAP_NAME" --format="value(state)")
+    if [[ $STATUS == "ACTIVE" ]]; then
+      echo "Map entry $MAP_ENTRY_NAME is ACTIVE."
+      break
+    else
+      echo "Map entry $MAP_ENTRY_NAME is $STATUS. Waiting..."
+      for i in {1..60}; do
+        echo -n "."
+        sleep 1
+      done
+      echo
+    fi
+  done
+done
+
+# Step 6: Optional - Attach the SSL Map with the Load Balancer
+echo "Do you want to attach the SSL map to a load balancer? (y/n):"
+read ATTACH_LB
+if [[ $ATTACH_LB == "y" ]]; then
+  LB_LIST=$(gcloud compute target-https-proxies list --format="value(name)")
+  if [[ -z $LB_LIST ]]; then
+    echo "There are no eligible load balancers available for SSL map association. Please create a suitable load balancer and try again."
+  else
+    echo "Available load balancers:"
+    echo "$LB_LIST"
+    echo "Enter the name of the load balancer target proxy:"
+    read LB_TARGET_PROXY_NAME
+    gcloud compute target-https-proxies update $LB_TARGET_PROXY_NAME --certificate-map="$CERT_MAP_NAME"
+  fi
+else
+  echo "SSL map creation completed without attaching to a load balancer."
+fi
+
+echo "Script execution completed."
+I have created a repository on Github, which contains all the required file.
+
+Hope this will help you manage certs at ease and simply the bulk cert creation.
